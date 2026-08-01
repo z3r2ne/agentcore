@@ -4,12 +4,25 @@
 semantics. It is designed to be imported as a library rather than launched as
 a CLI or RPC subprocess.
 
+Documentation: [中文使用指南](docs/USAGE.zh-CN.md) · [Pi conformance boundary](PI_CONFORMANCE.md)
+
+## Installation
+
 ```bash
-go get github.com/z3r2ne/agentcore
+go get github.com/z3r2ne/agentcore@v0.2.0
 ```
 
-The command above applies after this repository is published and tagged. For
-local sibling development, use:
+For a private repository, bypass the public Go proxy/checksum database and
+route GitHub HTTPS module fetches through SSH on port 443:
+
+```bash
+go env -w GOPRIVATE=github.com/z3r2ne/*
+git config --global url."ssh://git@ssh.github.com:443/".insteadOf https://github.com/
+go get github.com/z3r2ne/agentcore@v0.2.0
+```
+
+Use a read-only deploy key, GitHub App token, or another least-privilege
+credential in CI. For local sibling development, use:
 
 ```go
 require github.com/z3r2ne/agentcore v0.0.0
@@ -166,6 +179,52 @@ result, err := stream.Result()
 
 For callers that already own an event bus, `Agent.Prompt` invokes an
 `EventSink` synchronously instead of allocating an iterator.
+
+## OpenAI-compatible provider
+
+The optional `provider/openai` package implements streaming Chat Completions
+without adding provider behavior to the root package:
+
+```go
+import (
+    "context"
+    "os"
+    "time"
+
+    "github.com/z3r2ne/agentcore"
+    openaiprovider "github.com/z3r2ne/agentcore/provider/openai"
+)
+
+model, err := openaiprovider.New(openaiprovider.Config{
+    Model:   "gpt-4.1",
+    APIKey:  os.Getenv("OPENAI_API_KEY"),
+    BaseURL: "https://api.openai.com/v1", // replace for a compatible service
+    Headers: map[string]string{"OpenAI-Organization": "org_example"},
+})
+if err != nil {
+    panic(err)
+}
+
+agent, err := agentcore.New(agentcore.Config{
+    Model: model,
+    ModelRetry: agentcore.RetryPolicy{
+        MaxAttempts:  3,
+        InitialDelay: 250 * time.Millisecond,
+        ShouldRetry:  openaiprovider.IsRetryable,
+    },
+})
+
+result, err := agent.Prompt(context.Background(), agentcore.State{}, []agentcore.Message{
+    agentcore.TextMessage(agentcore.RoleUser, "Use tools when useful."),
+}, nil)
+```
+
+The adapter supports SSE, parallel function calls, `reasoning_content`, usage,
+serializable provider data across tool turns, custom endpoints, headers and HTTP
+clients, and context cancellation. Non-2xx errors are returned as
+`*openai.Error`; body, SSE-event, and total-response limits are configurable.
+Request `ModelOptions` are forwarded except transport-owned fields such as
+`model`, `messages`, `tools`, `stream`, `stream_options`, and `n`.
 
 ## Eino adapter
 
