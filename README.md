@@ -9,7 +9,7 @@ Documentation: [中文使用指南](docs/USAGE.zh-CN.md) · [Pi conformance boun
 ## Installation
 
 ```bash
-go get github.com/z3r2ne/agentcore@v0.2.0
+go get github.com/z3r2ne/agentcore@v0.2.1
 ```
 
 For a private repository, bypass the public Go proxy/checksum database and
@@ -18,7 +18,7 @@ route GitHub HTTPS module fetches through SSH on port 443:
 ```bash
 go env -w GOPRIVATE=github.com/z3r2ne/*
 git config --global url."ssh://git@ssh.github.com:443/".insteadOf https://github.com/
-go get github.com/z3r2ne/agentcore@v0.2.0
+go get github.com/z3r2ne/agentcore@v0.2.1
 ```
 
 Use a read-only deploy key, GitHub App token, or another least-privilege
@@ -179,6 +179,13 @@ result, err := stream.Result()
 
 For callers that already own an event bus, `Agent.Prompt` invokes an
 `EventSink` synchronously instead of allocating an iterator.
+
+Tool arguments remain observable while they are generated. On
+`EventMessageUpdate`, read `event.Delta.ToolCallDeltas`: each
+`ArgumentsDelta` is arbitrary text and callers may concatenate it by tool-call
+index for a typewriter preview. `event.Message.ToolCalls()` exposes no partial
+`Arguments`; final, valid JSON arguments appear on `EventMessageEnd` and the
+subsequent `EventToolExecutionStart`.
 
 ## OpenAI-compatible provider
 

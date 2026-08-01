@@ -425,7 +425,9 @@ func (a *Agent) streamAssistantAttempt(ctx context.Context, state State, turn in
 	if err := emit.send(Event{Type: EventMessageStart, Turn: turn, Message: &startCopy}); err != nil {
 		return assistant, err
 	}
-	accumulator := responseAccumulator{message: &assistant, toolBlockIndexes: map[int]int{}}
+	accumulator := responseAccumulator{
+		message: &assistant, toolBlockIndexes: map[int]int{}, toolArguments: map[int][]byte{},
+	}
 	for {
 		chunk, recvErr := receiveModelChunk(stream)
 		if errors.Is(recvErr, io.EOF) {
@@ -440,6 +442,9 @@ func (a *Agent) streamAssistantAttempt(ctx context.Context, state State, turn in
 		if err := emit.send(Event{Type: EventMessageUpdate, Turn: turn, Message: &updateCopy, Delta: &chunkCopy}); err != nil {
 			return assistant, err
 		}
+	}
+	if err := accumulator.finalizeToolCalls(); err != nil && assistant.StopReason != StopReasonLength {
+		return fail(modelCallError{err: fmt.Errorf("finalize model tool calls: %w", err)}, true)
 	}
 	if assistant.StopReason == "" {
 		if len(assistant.ToolCalls()) > 0 {
@@ -529,7 +534,7 @@ func normalizeAssistantToolCalls(message *Message) bool {
 			providerInvalid = true
 		}
 		seen[block.ToolCall.ID] = struct{}{}
-		if len(block.ToolCall.Arguments) == 0 {
+		if len(block.ToolCall.Arguments) == 0 && message.StopReason != StopReasonLength {
 			block.ToolCall.Arguments = json.RawMessage("{}")
 		}
 	}
@@ -552,6 +557,7 @@ func (a *Agent) finish(state State, newMessages []Message, turns int, reason Sto
 type responseAccumulator struct {
 	message          *Message
 	toolBlockIndexes map[int]int
+	toolArguments    map[int][]byte
 }
 
 func (a *responseAccumulator) add(chunk ModelChunk) {
@@ -569,6 +575,12 @@ func (a *responseAccumulator) add(chunk ModelChunk) {
 		}
 	}
 	for _, delta := range chunk.ToolCallDeltas {
+		if a.toolBlockIndexes == nil {
+			a.toolBlockIndexes = make(map[int]int)
+		}
+		if a.toolArguments == nil {
+			a.toolArguments = make(map[int][]byte)
+		}
 		blockIndex, exists := a.toolBlockIndexes[delta.Index]
 		if !exists {
 			call := ToolCall{ID: delta.ID, Name: delta.Name}
@@ -583,7 +595,7 @@ func (a *responseAccumulator) add(chunk ModelChunk) {
 		if delta.Name != "" {
 			call.Name = delta.Name
 		}
-		call.Arguments = append(call.Arguments, delta.ArgumentsDelta...)
+		a.toolArguments[delta.Index] = append(a.toolArguments[delta.Index], delta.ArgumentsDelta...)
 	}
 	if chunk.StopReason != "" {
 		a.message.StopReason = chunk.StopReason
@@ -594,6 +606,22 @@ func (a *responseAccumulator) add(chunk ModelChunk) {
 	if chunk.ProviderData != nil {
 		a.message.ProviderData = chunk.ProviderData
 	}
+}
+
+func (a *responseAccumulator) finalizeToolCalls() error {
+	for index, blockIndex := range a.toolBlockIndexes {
+		call := a.message.Content[blockIndex].ToolCall
+		arguments := a.toolArguments[index]
+		if len(arguments) == 0 {
+			call.Arguments = json.RawMessage("{}")
+			continue
+		}
+		if !json.Valid(arguments) {
+			return fmt.Errorf("tool %q produced invalid JSON arguments", call.Name)
+		}
+		call.Arguments = append(json.RawMessage(nil), arguments...)
+	}
+	return nil
 }
 
 func (a *responseAccumulator) appendText(kind ContentType, delta string) {

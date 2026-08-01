@@ -55,7 +55,9 @@ func NewSummaryCompactor(config SummaryCompactorConfig) (func(context.Context, [
 		}
 		defer stream.Close()
 		assistant := Message{Role: RoleAssistant}
-		accumulator := responseAccumulator{message: &assistant, toolBlockIndexes: map[int]int{}}
+		accumulator := responseAccumulator{
+			message: &assistant, toolBlockIndexes: map[int]int{}, toolArguments: map[int][]byte{},
+		}
 		for {
 			chunk, err := stream.Recv()
 			if errors.Is(err, io.EOF) {
@@ -65,6 +67,9 @@ func NewSummaryCompactor(config SummaryCompactorConfig) (func(context.Context, [
 				return nil, fmt.Errorf("receive summary model: %w", err)
 			}
 			accumulator.add(chunk)
+		}
+		if err := accumulator.finalizeToolCalls(); err != nil {
+			return nil, fmt.Errorf("finalize summary model tool calls: %w", err)
 		}
 		if len(assistant.ToolCalls()) > 0 {
 			return nil, errors.New("summary model returned a tool call")

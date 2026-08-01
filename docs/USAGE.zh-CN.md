@@ -1,6 +1,6 @@
 # agentcore 中文使用指南
 
-本文面向希望把 `agentcore` 作为 Go 库嵌入自己项目的开发者。示例基于 `v0.2.0`。
+本文面向希望把 `agentcore` 作为 Go 库嵌入自己项目的开发者。示例基于 `v0.2.1`。
 
 ## 1. 它负责什么
 
@@ -29,7 +29,7 @@
 公开仓库直接安装：
 
 ```bash
-go get github.com/z3r2ne/agentcore@v0.2.0
+go get github.com/z3r2ne/agentcore@v0.2.1
 ```
 
 如果仓库保持私有，先让 Go 跳过公共代理和校验服务，并让 Git 使用已有 SSH 权限：
@@ -37,7 +37,7 @@ go get github.com/z3r2ne/agentcore@v0.2.0
 ```bash
 go env -w GOPRIVATE=github.com/z3r2ne/*
 git config --global url."ssh://git@ssh.github.com:443/".insteadOf https://github.com/
-go get github.com/z3r2ne/agentcore@v0.2.0
+go get github.com/z3r2ne/agentcore@v0.2.1
 ```
 
 CI 中应使用只读 Deploy Key、GitHub App Token 或最小权限凭据，不要把个人 Token 写进 `go.mod`、源码或镜像。
@@ -494,6 +494,13 @@ result, err := stream.Result()
 
 `EventStream` 使用内存中的无界事件队列。消费者短暂变慢不会阻塞模型，但长期不读取可能增加内存；生产系统应持续消费并转发到自己的有界消息系统。
 
+Tool 参数生成过程不会丢失。`message_update` 中的
+`event.Delta.ToolCallDeltas[].ArgumentsDelta` 是任意文本片段，可能只是 `{`
+或 `"path":`，调用方可以按 `Index` 累积并显示打字机效果。此时它不是
+JSON，不能按 `json.RawMessage` 处理。只有 `message_end` 的
+`event.Message.ToolCalls()` 以及后续 `tool_execution_start` 才包含最终、完整且
+合法的 `Arguments`。
+
 ## 11. Session、Steer 与 FollowUp
 
 `Session` 持有持续会话状态，同一时间只允许一个 Prompt 正在执行：
@@ -633,7 +640,7 @@ context_compaction_start / context_compaction_end
 
 ## 17. 生产检查清单
 
-- 固定明确版本，例如 `v0.2.0`，不要依赖浮动 `main`；
+- 固定明确版本，例如 `v0.2.1`，不要依赖浮动 `main`；
 - Model 凭据由宿主 Secret 系统管理；
 - 为危险 Tool 添加审批/权限 Interceptor；
 - 为副作用 Tool 设计幂等键；
@@ -663,4 +670,4 @@ your-project/
 
 - [英文 README](../README.md)
 - [Pi 行为一致性边界](../PI_CONFORMANCE.md)
-- [v0.2.0 Release](https://github.com/z3r2ne/agentcore/releases/tag/v0.2.0)
+- [v0.2.1 Release](https://github.com/z3r2ne/agentcore/releases/tag/v0.2.1)

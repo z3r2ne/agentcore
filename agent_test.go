@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -116,6 +117,91 @@ func TestPiConformanceToolLoopAndEventOrder(t *testing.T) {
 	}
 	if !reflect.DeepEqual(types, want) {
 		t.Fatalf("event types:\n got  %v\n want %v", types, want)
+	}
+}
+
+func TestStreamingToolArgumentsRemainSerializableDeltasUntilMessageEnd(t *testing.T) {
+	model := &fakeModel{responses: [][]ModelChunk{
+		{
+			{ToolCallDeltas: []ToolCallDelta{{Index: 0, ID: "call-1", Name: "open", ArgumentsDelta: `{`}}},
+			{ToolCallDeltas: []ToolCallDelta{{Index: 0, ArgumentsDelta: `"path":`}}},
+			{ToolCallDeltas: []ToolCallDelta{{Index: 0, ArgumentsDelta: `"README.md"}`}}, StopReason: StopReasonToolUse},
+		},
+		{{TextDelta: "done", StopReason: StopReasonStop}},
+	}}
+	tool := FuncTool{
+		ToolDefinition: ToolDefinition{Name: "open", Parameters: json.RawMessage(`{"type":"object"}`)},
+		ExecuteFunc: func(_ context.Context, arguments json.RawMessage, _ ToolUpdateSink) (ToolResult, error) {
+			if string(arguments) != `{"path":"README.md"}` {
+				t.Fatalf("arguments = %s", arguments)
+			}
+			return TextToolResult("opened"), nil
+		},
+	}
+	agent, err := New(Config{Model: model, Tools: []Tool{tool}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deltas []string
+	var completed ToolCall
+	_, err = agent.Prompt(context.Background(), State{}, []Message{TextMessage(RoleUser, "open")}, func(_ context.Context, event Event) error {
+		if _, err := json.Marshal(event); err != nil {
+			return err
+		}
+		if event.Type == EventMessageUpdate && event.Delta != nil {
+			for _, delta := range event.Delta.ToolCallDeltas {
+				deltas = append(deltas, delta.ArgumentsDelta)
+			}
+			if event.Message != nil {
+				for _, call := range event.Message.ToolCalls() {
+					if len(call.Arguments) != 0 {
+						t.Fatalf("partial message exposed final arguments: %s", call.Arguments)
+					}
+				}
+			}
+		}
+		if event.Type == EventMessageEnd && event.Message != nil {
+			calls := event.Message.ToolCalls()
+			if len(calls) == 1 && calls[0].Name == "open" {
+				completed = calls[0]
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(deltas, ""); got != `{"path":"README.md"}` {
+		t.Fatalf("argument deltas = %q", got)
+	}
+	if string(completed.Arguments) != `{"path":"README.md"}` {
+		t.Fatalf("completed call = %+v", completed)
+	}
+}
+
+func TestMalformedCompletedToolArgumentsFailWithoutBreakingEventJSON(t *testing.T) {
+	model := &fakeModel{responses: [][]ModelChunk{{{
+		ToolCallDeltas: []ToolCallDelta{{Index: 0, ID: "call-1", Name: "broken", ArgumentsDelta: `{"path":`}},
+		StopReason:     StopReasonToolUse,
+	}}}}
+	var executed atomic.Bool
+	tool := FuncTool{ToolDefinition: ToolDefinition{Name: "broken"}, ExecuteFunc: func(context.Context, json.RawMessage, ToolUpdateSink) (ToolResult, error) {
+		executed.Store(true)
+		return TextToolResult("unexpected"), nil
+	}}
+	agent, err := New(Config{Model: model, Tools: []Tool{tool}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := agent.Prompt(context.Background(), State{}, []Message{TextMessage(RoleUser, "break")}, func(_ context.Context, event Event) error {
+		_, marshalErr := json.Marshal(event)
+		return marshalErr
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid JSON arguments") {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if executed.Load() {
+		t.Fatal("malformed tool call was executed")
 	}
 }
 

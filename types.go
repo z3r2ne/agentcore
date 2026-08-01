@@ -84,12 +84,13 @@ func (u Usage) Cost(pricing Pricing) Cost {
 	return Cost{Amount: amount / 1_000_000, Currency: pricing.Currency}
 }
 
-// ToolCall is a model-requested tool invocation. Arguments must contain a JSON
-// object or another JSON value accepted by the tool.
+// ToolCall is a completed model-requested tool invocation. Arguments contains
+// the final JSON value accepted by the tool. Streaming, potentially incomplete
+// argument text is exposed only through ToolCallDelta.ArgumentsDelta.
 type ToolCall struct {
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 
 // ContentBlock is one text, thinking, tool-call, or multimodal media block.
@@ -168,7 +169,8 @@ type ModelRequest struct {
 }
 
 // ToolCallDelta incrementally builds one tool call. Index is stable within a
-// single assistant response.
+// single assistant response. ArgumentsDelta is arbitrary text and is not
+// required to be valid JSON until the assistant message is complete.
 type ToolCallDelta struct {
 	Index          int    `json:"index"`
 	ID             string `json:"id,omitempty"`
