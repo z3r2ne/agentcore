@@ -319,6 +319,13 @@ func TestToolCancellationEndsRunAsAborted(t *testing.T) {
 	if !errors.Is(runErr, context.Canceled) || result.StopReason != StopReasonAborted {
 		t.Fatalf("result = %+v, err = %v", result, runErr)
 	}
+	if len(result.State.Messages) != 3 {
+		t.Fatalf("interrupted tool history has %d messages, want 3: %+v", len(result.State.Messages), result.State.Messages)
+	}
+	toolMessage := result.State.Messages[2]
+	if toolMessage.Role != RoleTool || toolMessage.ToolCallID != "call-1" || !toolMessage.IsError || toolMessage.Text() == "" {
+		t.Fatalf("interrupted tool result = %+v", toolMessage)
+	}
 	eventsMu.Lock()
 	defer eventsMu.Unlock()
 	if len(events) == 0 || events[len(events)-1].Type != EventAgentEnd {

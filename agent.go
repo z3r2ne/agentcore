@@ -211,11 +211,11 @@ func (a *Agent) run(ctx context.Context, state State, newMessages []Message, emi
 				outcomes, err = active.executeToolCalls(ctx, &state, calls, turn, emit)
 			}
 			if err != nil {
-				stop := StopReasonError
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					stop = StopReasonAborted
-				}
-				return a.finish(state, newMessages, turn, stop, err, emit)
+				// Keep provider history valid even when a process shutdown, context
+				// cancellation, or event sink failure interrupts tool execution. An
+				// assistant tool call must always be followed by one result for every
+				// call ID before a later user or assistant message is appended.
+				outcomes = completeInterruptedToolOutcomes(calls, outcomes, err)
 			}
 			terminate = outcomesTerminate(outcomes)
 			for _, outcome := range outcomes {
@@ -230,6 +230,13 @@ func (a *Agent) run(ctx context.Context, state State, newMessages []Message, emi
 				if err := emit.send(Event{Type: EventMessageEnd, Turn: turn, Message: &copy}); err != nil {
 					return resultFrom(state, newMessages, turn, StopReasonError), err
 				}
+			}
+			if err != nil {
+				stop := StopReasonError
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					stop = StopReasonAborted
+				}
+				return a.finish(state, newMessages, turn, stop, err, emit)
 			}
 		}
 

@@ -581,6 +581,61 @@ func TestSessionAbortCancelsActiveModelAndSettles(t *testing.T) {
 	}
 }
 
+func TestSessionRestoreRepairsInterruptedParallelToolCallHistory(t *testing.T) {
+	agent, err := New(Config{Model: &fakeModel{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := SessionSnapshot{State: State{Messages: []Message{
+		TextMessage(RoleUser, "start"),
+		{Role: RoleAssistant, Content: []ContentBlock{
+			{Type: ContentToolCall, ToolCall: &ToolCall{ID: "call-1", Name: "first", Arguments: json.RawMessage(`{}`)}},
+			{Type: ContentToolCall, ToolCall: &ToolCall{ID: "call-2", Name: "second", Arguments: json.RawMessage(`{}`)}},
+		}},
+		{Role: RoleTool, ToolCallID: "call-1", ToolName: "first", Content: []ContentBlock{{Type: ContentText, Text: "done"}}},
+		TextMessage(RoleUser, "resume after restart"),
+	}}}
+
+	session, err := NewSessionFromSnapshot(agent, snapshot, SessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := session.State().Messages
+	if len(messages) != 5 {
+		t.Fatalf("messages = %+v", messages)
+	}
+	if messages[2].ToolCallID != "call-1" || messages[2].IsError {
+		t.Fatalf("existing result changed: %+v", messages[2])
+	}
+	if messages[3].Role != RoleTool || messages[3].ToolCallID != "call-2" || messages[3].ToolName != "second" || !messages[3].IsError {
+		t.Fatalf("repaired result = %+v", messages[3])
+	}
+	if messages[4].Role != RoleUser || messages[4].Text() != "resume after restart" {
+		t.Fatalf("later message moved incorrectly: %+v", messages[4])
+	}
+	if got := len(snapshot.State.Messages); got != 4 {
+		t.Fatalf("input snapshot mutated: %d messages", got)
+	}
+}
+
+func TestSessionRestoreKeepsCompleteToolCallHistoryUnchanged(t *testing.T) {
+	agent, err := New(Config{Model: &fakeModel{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := SessionSnapshot{State: State{Messages: []Message{
+		{Role: RoleAssistant, Content: []ContentBlock{{Type: ContentToolCall, ToolCall: &ToolCall{ID: "call-1", Name: "done", Arguments: json.RawMessage(`{}`)}}}},
+		{Role: RoleTool, ToolCallID: "call-1", ToolName: "done", Content: []ContentBlock{{Type: ContentText, Text: "ok"}}},
+	}}}
+	session, err := NewSessionFromSnapshot(agent, snapshot, SessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messages := session.State().Messages; len(messages) != 2 || messages[1].Text() != "ok" || messages[1].IsError {
+		t.Fatalf("complete history changed: %+v", messages)
+	}
+}
+
 func TestSessionCheckpointFailureIsReturnedAndStateRemainsAvailable(t *testing.T) {
 	model := &fakeModel{responses: [][]ModelChunk{{{TextDelta: "done", StopReason: StopReasonStop}}}}
 	agent, _ := New(Config{Model: model})

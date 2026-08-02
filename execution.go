@@ -22,6 +22,28 @@ type preparedToolCall struct {
 	immediate   *ToolResult
 }
 
+func completeInterruptedToolOutcomes(calls []ToolCall, outcomes []toolOutcome, cause error) []toolOutcome {
+	completed := make(map[string]toolOutcome, len(outcomes))
+	for _, outcome := range outcomes {
+		if outcome.call.ID != "" {
+			completed[outcome.call.ID] = outcome
+		}
+	}
+	ordered := make([]toolOutcome, 0, len(calls))
+	for _, call := range calls {
+		if outcome, ok := completed[call.ID]; ok {
+			ordered = append(ordered, outcome)
+			continue
+		}
+		message := "tool execution was interrupted before a result was recorded"
+		if cause != nil {
+			message += ": " + cause.Error()
+		}
+		ordered = append(ordered, toolOutcome{call: cloneToolCall(call), result: errorToolResult(message)})
+	}
+	return ordered
+}
+
 func (a *Agent) rejectTruncatedCalls(ctx context.Context, calls []ToolCall, turn int, emit *eventEmitter) ([]toolOutcome, error) {
 	outcomes := make([]toolOutcome, 0, len(calls))
 	for _, call := range calls {
