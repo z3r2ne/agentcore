@@ -26,3 +26,8 @@ Intentional API differences:
 
 RPC commands, TUI events, session files, authentication, and Pi extensions are
 outside this package's conformance boundary.
+
+Provider transports are covered separately in [PROVIDERS.md](PROVIDERS.md).
+The pinned Pi catalog's 10 wire APIs and 38 provider IDs are implemented;
+interactive login, OAuth refresh, secret storage, and remote model-list refresh
+remain responsibilities of the host application.

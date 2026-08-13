@@ -103,8 +103,9 @@ func NewSession(agent *Agent, initial State, options SessionOptions) (*Session, 
 	}
 	idle := make(chan struct{})
 	close(idle)
+	repaired, _ := RepairHistory(initial.Messages)
 	return &Session{
-		agent: agent, state: State{Messages: cloneMessages(initial.Messages)}, options: options,
+		agent: agent, state: State{Messages: repaired}, options: options,
 		idle: idle, pendingTools: map[string]string{},
 	}, nil
 }
@@ -123,7 +124,7 @@ func NewSessionFromSnapshot(agent *Agent, snapshot SessionSnapshot, options Sess
 	// but before every tool result is committed. Repair that interrupted turn
 	// before accepting new prompts so OpenAI-compatible providers do not reject
 	// the restored history as an invalid tool-call sequence.
-	snapshot.State.Messages = repairInterruptedToolCallHistory(snapshot.State.Messages)
+	snapshot.State.Messages, _ = RepairHistory(snapshot.State.Messages)
 	session, err := NewSession(agent, snapshot.State, options)
 	if err != nil {
 		return nil, err
@@ -133,42 +134,6 @@ func NewSessionFromSnapshot(agent *Agent, snapshot SessionSnapshot, options Sess
 	session.usage = snapshot.Usage
 	session.lastError = snapshot.LastError
 	return session, nil
-}
-
-func repairInterruptedToolCallHistory(messages []Message) []Message {
-	repaired := make([]Message, 0, len(messages))
-	for index := 0; index < len(messages); {
-		message := cloneMessage(messages[index])
-		repaired = append(repaired, message)
-		calls := message.ToolCalls()
-		if message.Role != RoleAssistant || len(calls) == 0 {
-			index++
-			continue
-		}
-
-		responded := make(map[string]struct{}, len(calls))
-		index++
-		for index < len(messages) && messages[index].Role == RoleTool {
-			toolMessage := cloneMessage(messages[index])
-			repaired = append(repaired, toolMessage)
-			if toolMessage.ToolCallID != "" {
-				responded[toolMessage.ToolCallID] = struct{}{}
-			}
-			index++
-		}
-		for _, call := range calls {
-			if call.ID == "" {
-				continue
-			}
-			if _, ok := responded[call.ID]; ok {
-				continue
-			}
-			repaired = append(repaired, toolResultMessage(call, errorToolResult(
-				"tool execution was interrupted before its result was durably recorded; inspect current state and retry the operation if it is still needed",
-			)))
-		}
-	}
-	return repaired
 }
 
 // Prompt runs prompts against the current session state. Only one run may be

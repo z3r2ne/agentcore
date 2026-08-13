@@ -20,9 +20,11 @@
 - Session、Steer、FollowUp、Abort 和事件订阅；
 - 上下文预算、压缩和 Token/Cost 统计；
 - 可选的 SQLite Session 持久化；
+- Pi 0.82.1 对应的 10 种 wire API 与 38 个 Provider 预设；
+- 对中断、失败及 Tool Call/Result 错位历史的确定性清洗与校验；
 - Eino Model 与 Tool 适配器。
 
-它不负责 HTTP API、任务调度、用户系统、权限数据库、MCP 管理、TUI 或具体 Provider 登录。宿主项目应把这些能力转换成 `Model`、`Tool`、`Skill`、`Interceptor` 或 `SessionStore`。
+它不负责 HTTP API、任务调度、用户系统、权限数据库、MCP 管理、TUI、Provider 登录、OAuth 刷新或密钥存储。宿主项目应把这些能力转换成 `Model`、`Tool`、`Skill`、`Interceptor` 或 `SessionStore`。
 
 ## 2. 安装
 
@@ -108,7 +110,40 @@ type ModelStream interface {
 4. 把 Provider 的 Token 用量写入 `ModelChunk.Usage`；
 5. 在 `Close` 中释放网络流。
 
-### 4.1 OpenAI-compatible Chat Completions
+### 4.1 内置 Provider Catalog
+
+`provider` 包实现了 Pi 0.82.1 中全部 10 种 wire API，并为该版本的 38 个
+Provider ID 提供端点和首选协议配置：
+
+```go
+import (
+    "os"
+
+    "github.com/z3r2ne/agentcore/provider"
+)
+
+model, err := provider.New("openrouter", provider.Config{
+    Model:  "anthropic/claude-sonnet-4",
+    APIKey: os.Getenv("OPENROUTER_API_KEY"),
+})
+```
+
+原生协议包包括：
+
+- `provider/openai`：OpenAI-compatible Chat Completions；
+- `provider/openairesponses`：OpenAI、Azure 与 Codex Responses；
+- `provider/anthropic`：Anthropic Messages；
+- `provider/bedrock`：Amazon Bedrock ConverseStream；
+- `provider/google`：Google Gemini 与 Vertex；
+- `provider/mistral`：Mistral Conversations；
+- `provider/pimessages`：Pi/Radius Messages。
+
+`provider.New` 不会自动读取环境变量或刷新 Token。凭据应由宿主 Secret
+系统读取后传入；账号相关的 Cloudflare/OpenCode、Azure deployment 和
+Google Vertex 还需要显式 `BaseURL`。所有 ID、备选协议和端点要求见
+[Provider 支持矩阵](../PROVIDERS.md)。
+
+### 4.2 OpenAI-compatible Chat Completions
 
 仓库内置了可选的具体 Provider，它位于独立子包，不会把 OpenAI 配置或 HTTP 行为带入根包：
 
@@ -203,7 +238,7 @@ if errors.As(err, &providerErr) {
 
 如果不设置 `ShouldRetry`，`agentcore` 会重试所有模型传输/流错误；生产环境推荐使用 `openaiprovider.IsRetryable`，从而只重试 408、409、425、429、5xx、网络错误和流中临时错误，不重试普通 4xx 或 Context 取消。
 
-### 4.2 Eino Adapter
+### 4.3 Eino Adapter
 
 如果项目已经使用 CloudWeGo Eino，可以直接使用内置适配器：
 
@@ -578,7 +613,36 @@ session, err := store.RestoreSession(
 
 Session Store 只保存消息、Usage、投递队列和 ProviderData，不保存运行中的网络连接、Tool 实例、订阅者或 Context。
 
-## 13. 上下文管理
+## 13. 历史安全与中断恢复
+
+Model 流中断、EventSink 失败或进程退出时，最危险的情况是把半截 Assistant
+Tool Call 或不完整 Tool Result 留到下一轮。`agentcore` 在每次请求模型前、
+Session 恢复后，以及自定义上下文转换/压缩后都会对历史的副本执行修复：
+
+- 失败或已取消的 Assistant 尝试不会进入可重放历史；
+- JSON 不完整的 Tool Call 会被删除；
+- 孤立、重复、错序的 Tool Result 会被删除或按原 Tool Call 顺序重排；
+- 完整 Tool Call 缺失结果时，会补一个确定性的错误结果，并明确标记
+  “工具副作用未知”，不会擅自重试工具；
+- Tool Call ID 缺失或重复时会确定性规范化，并丢弃不再可信的
+  ProviderData。
+
+应用也可以在导入旧记录或自定义存储边界主动检查：
+
+```go
+repaired, report := agentcore.RepairHistory(messages)
+if report.Changed {
+    log.Printf("修复了 %d 个历史问题", len(report.Issues))
+}
+if err := agentcore.ValidateHistory(repaired); err != nil {
+    return err
+}
+```
+
+`RepairHistory` 不修改输入，且具有确定性和幂等性。它只修复对 Provider
+回放安全所需的结构；业务系统仍应为有副作用 Tool 设计幂等键和操作日志。
+
+## 14. 上下文管理
 
 ```go
 compactor, err := agentcore.NewSummaryCompactor(agentcore.SummaryCompactorConfig{
@@ -601,7 +665,7 @@ agent, err := agentcore.New(agentcore.Config{
 
 没有自定义 `EstimateTokens` 时使用 Provider 无关估算；生产环境需要精确预算时应接入目标模型 tokenizer。没有 `Compact` 时，核心会保留最新的合法消息后缀，并避免留下孤立 Tool Result。
 
-## 14. 事件与可观测性
+## 15. 事件与可观测性
 
 常用事件：
 
@@ -616,7 +680,7 @@ context_compaction_start / context_compaction_end
 
 建议在宿主项目中给 Context 注入 `taskId`、`executionId`、`traceId` 等关联信息，并在 EventSink、Interceptor 和 Tool 中统一读取。不要直接记录密钥、完整 Authorization Header 或未经脱敏的 Tool Result。
 
-## 15. 错误、取消与重试
+## 16. 错误、取消与重试
 
 - Model 传输或流错误可以使用 `ModelRetry`；
 - Tool 重试由全局 `ToolPolicy` 与 Tool 自己的 Policy 合并；
@@ -628,7 +692,7 @@ context_compaction_start / context_compaction_end
 
 是否重试有副作用的 Tool 必须谨慎。只有在工具具备幂等语义时，才应配置自动重试。
 
-## 16. 并发模型
+## 17. 并发模型
 
 - 创建完成的 `Agent` 可以并发复用；
 - `Builder` 是可变装配器，不应并发修改；
@@ -638,7 +702,7 @@ context_compaction_start / context_compaction_end
 - `MaxToolConcurrency` 限制单批工具并发；
 - Model、Tool、Skill Loader、Interceptor、EventSink 和 SessionStore 都应遵守 Context，并明确自己的线程安全边界。
 
-## 17. 生产检查清单
+## 18. 生产检查清单
 
 - 固定明确版本，例如 `v0.2.1`，不要依赖浮动 `main`；
 - Model 凭据由宿主 Secret 系统管理；
@@ -648,10 +712,11 @@ context_compaction_start / context_compaction_end
 - 限制 Tool Result 大小并对日志脱敏；
 - 持续消费 EventStream；
 - 使用 SessionStore 时设计 Session ID 的租户和任务隔离；
+- 导入旧会话或第三方记录时运行 `RepairHistory` 并记录修复报告；
 - 对自定义 Tool、Skill、Interceptor 运行 `go test -race`；
 - 在升级版本前阅读 Release Notes，并运行宿主项目完整测试。
 
-## 18. 推荐的项目边界
+## 19. 推荐的项目边界
 
 ```text
 your-project/
@@ -666,8 +731,9 @@ your-project/
 
 不要把业务任务状态机放入 `agentcore`。核心库只运行一个 Agent；任务编排、队列、协同模式和多 Agent 生命周期应由宿主项目管理。
 
-## 19. 更多资料
+## 20. 更多资料
 
 - [英文 README](../README.md)
+- [Provider 支持矩阵](../PROVIDERS.md)
 - [Pi 行为一致性边界](../PI_CONFORMANCE.md)
 - [v0.2.1 Release](https://github.com/z3r2ne/agentcore/releases/tag/v0.2.1)

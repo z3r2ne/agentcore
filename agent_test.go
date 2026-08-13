@@ -413,12 +413,8 @@ func TestModelStartErrorProducesClosedAssistantMessage(t *testing.T) {
 	if runErr == nil || result.StopReason != StopReasonError {
 		t.Fatalf("result = %+v, err = %v", result, runErr)
 	}
-	if len(result.State.Messages) != 2 {
+	if len(result.State.Messages) != 1 {
 		t.Fatalf("messages = %+v", result.State.Messages)
-	}
-	assistant := result.State.Messages[1]
-	if assistant.Role != RoleAssistant || !assistant.IsError || assistant.Error == "" {
-		t.Fatalf("assistant = %+v", assistant)
 	}
 	if got := eventTypes(events); len(got) < 3 || got[len(got)-3] != EventMessageStart || got[len(got)-2] != EventMessageEnd || got[len(got)-1] != EventAgentEnd {
 		t.Fatalf("events = %v", got)

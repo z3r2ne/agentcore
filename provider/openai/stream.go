@@ -63,15 +63,23 @@ type stream struct {
 	message   map[string]any
 	toolCalls map[int]map[string]any
 	response  map[string]any
+	callIDs   map[string]int
+	nextCall  int
+	sawFinish bool
+	scope     string
 }
 
 func newStream(ctx context.Context, body io.ReadCloser, maxEventSize int) *stream {
+	return newStreamWithScope(ctx, body, maxEventSize, "")
+}
+
+func newStreamWithScope(ctx context.Context, body io.ReadCloser, maxEventSize int, scope string) *stream {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 64*1024), maxEventSize+1024)
 	return &stream{
 		ctx: ctx, body: body, scanner: scanner, maxEventSize: maxEventSize,
 		message: map[string]any{"role": "assistant"}, toolCalls: make(map[int]map[string]any),
-		response: make(map[string]any),
+		response: make(map[string]any), callIDs: make(map[string]int), scope: scope,
 	}
 }
 
@@ -98,10 +106,12 @@ type streamChoice struct {
 }
 
 type typedDelta struct {
-	Content          string `json:"content"`
-	ReasoningContent string `json:"reasoning_content"`
+	Content          json.RawMessage `json:"content"`
+	ReasoningContent string          `json:"reasoning_content"`
+	Reasoning        string          `json:"reasoning"`
+	ReasoningText    string          `json:"reasoning_text"`
 	ToolCalls        []struct {
-		Index    int    `json:"index"`
+		Index    *int   `json:"index"`
 		ID       string `json:"id"`
 		Type     string `json:"type"`
 		Function struct {
@@ -120,7 +130,10 @@ func (s *stream) Recv() (agentcore.ModelChunk, error) {
 		if err != nil {
 			s.done = true
 			if errors.Is(err, io.EOF) {
-				return agentcore.ModelChunk{}, io.EOF
+				if s.sawFinish {
+					return agentcore.ModelChunk{}, io.EOF
+				}
+				return agentcore.ModelChunk{}, &Error{Operation: "read stream", Body: "stream ended without finish_reason", Retryable: true, Err: io.ErrUnexpectedEOF}
 			}
 			if s.ctx.Err() != nil {
 				return agentcore.ModelChunk{}, s.ctx.Err()
@@ -129,6 +142,9 @@ func (s *stream) Recv() (agentcore.ModelChunk, error) {
 		}
 		if bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
 			s.done = true
+			if !s.sawFinish {
+				return agentcore.ModelChunk{}, &Error{Operation: "read stream", Body: "stream ended without finish_reason", Retryable: true, Err: io.ErrUnexpectedEOF}
+			}
 			return agentcore.ModelChunk{}, io.EOF
 		}
 		chunk, skip, err := s.decodeEvent(payload)
@@ -217,24 +233,100 @@ func (s *stream) decodeEvent(payload []byte) (agentcore.ModelChunk, bool, error)
 			}
 			s.mergeProviderDelta(choice.Delta)
 		}
-		chunk.TextDelta = delta.Content
-		chunk.ThinkingDelta = delta.ReasoningContent
+		chunk.TextDelta, chunk.ThinkingDelta = decodeDeltaContent(delta.Content)
+		if delta.ReasoningContent != "" {
+			chunk.ThinkingDelta = delta.ReasoningContent
+		}
+		if chunk.ThinkingDelta == "" {
+			chunk.ThinkingDelta = delta.Reasoning
+		}
+		if chunk.ThinkingDelta == "" {
+			chunk.ThinkingDelta = delta.ReasoningText
+		}
 		chunk.ToolCallDeltas = make([]agentcore.ToolCallDelta, len(delta.ToolCalls))
 		for index, call := range delta.ToolCalls {
+			callIndex := s.toolCallIndex(call.Index, call.ID)
 			chunk.ToolCallDeltas[index] = agentcore.ToolCallDelta{
-				Index: call.Index, ID: call.ID, Name: call.Function.Name, ArgumentsDelta: call.Function.Arguments,
+				Index: callIndex, ID: call.ID, Name: call.Function.Name, ArgumentsDelta: call.Function.Arguments,
 			}
 		}
 		if choice.FinishReason != nil {
-			chunk.StopReason = stopReason(*choice.FinishReason)
+			reason, terminalErr := checkedStopReason(*choice.FinishReason)
+			if terminalErr != nil {
+				return agentcore.ModelChunk{}, false, terminalErr
+			}
+			chunk.StopReason = reason
+			s.sawFinish = true
 		}
 	}
-	providerData, err := s.providerData()
-	if err != nil {
-		return agentcore.ModelChunk{}, false, &Error{Operation: "encode provider data", Retryable: false, Err: err}
+	// ProviderData is the complete accumulated provider message. Emitting it on
+	// every token repeatedly clones and marshals an ever-growing value (O(n²)).
+	// Terminal and usage chunks are sufficient for durable replay.
+	if chunk.StopReason != "" || chunk.Usage != nil {
+		providerData, err := s.providerData()
+		if err != nil {
+			return agentcore.ModelChunk{}, false, &Error{Operation: "encode provider data", Retryable: false, Err: err}
+		}
+		chunk.ProviderData = providerData
 	}
-	chunk.ProviderData = providerData
 	return chunk, !ok && chunk.Usage == nil, nil
+}
+
+func decodeDeltaContent(raw json.RawMessage) (text, thinking string) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", ""
+	}
+	if raw[0] == '"' {
+		_ = json.Unmarshal(raw, &text)
+		return text, ""
+	}
+	var blocks []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		Thinking []struct {
+			Text string `json:"text"`
+		} `json:"thinking"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return "", ""
+	}
+	for _, block := range blocks {
+		switch block.Type {
+		case "text":
+			text += block.Text
+		case "thinking", "reasoning":
+			if block.Text != "" {
+				thinking += block.Text
+			}
+			for _, part := range block.Thinking {
+				thinking += part.Text
+			}
+		}
+	}
+	return text, thinking
+}
+
+func (s *stream) toolCallIndex(index *int, id string) int {
+	if index != nil {
+		if id != "" {
+			s.callIDs[id] = *index
+		}
+		if *index >= s.nextCall {
+			s.nextCall = *index + 1
+		}
+		return *index
+	}
+	if id != "" {
+		if existing, ok := s.callIDs[id]; ok {
+			return existing
+		}
+	}
+	resolved := s.nextCall
+	s.nextCall++
+	if id != "" {
+		s.callIDs[id] = resolved
+	}
+	return resolved
 }
 
 func primaryChoice(choices []streamChoice) (streamChoice, bool) {
@@ -282,7 +374,13 @@ func (s *stream) mergeProviderDelta(raw json.RawMessage) {
 			if !ok {
 				continue
 			}
-			index := jsonInt(call["index"])
+			var explicitIndex *int
+			if rawIndex, exists := call["index"]; exists {
+				resolved := jsonInt(rawIndex)
+				explicitIndex = &resolved
+			}
+			id, _ := call["id"].(string)
+			index := s.toolCallIndex(explicitIndex, id)
 			delete(call, "index")
 			target := s.toolCalls[index]
 			if target == nil {
@@ -358,6 +456,7 @@ func jsonInt(value any) int {
 type preservedProviderData struct {
 	Message  map[string]any `json:"message"`
 	Response map[string]any `json:"response,omitempty"`
+	Source   string         `json:"source,omitempty"`
 }
 
 func (s *stream) providerData() (*agentcore.ProviderData, error) {
@@ -374,7 +473,7 @@ func (s *stream) providerData() (*agentcore.ProviderData, error) {
 		}
 		message["tool_calls"] = calls
 	}
-	preserved := preservedProviderData{Message: message}
+	preserved := preservedProviderData{Message: message, Source: s.scope}
 	if len(s.response) > 0 {
 		preserved.Response = cloneMap(s.response)
 	}
@@ -420,8 +519,12 @@ func decodeUsage(raw json.RawMessage) (agentcore.Usage, error) {
 	if cacheWrite == 0 {
 		cacheWrite = usage.PromptCacheMissTokens
 	}
+	uncachedInput := usage.PromptTokens - cacheRead - cacheWrite
+	if uncachedInput < 0 {
+		uncachedInput = 0
+	}
 	return agentcore.Usage{
-		InputTokens: usage.PromptTokens, OutputTokens: usage.CompletionTokens,
+		InputTokens: uncachedInput, OutputTokens: usage.CompletionTokens,
 		CacheReadTokens: cacheRead, CacheWriteTokens: cacheWrite,
 	}, nil
 }
@@ -449,5 +552,21 @@ func stopReason(reason string) agentcore.StopReason {
 		return ""
 	default:
 		return agentcore.StopReason(reason)
+	}
+}
+
+func checkedStopReason(reason string) (agentcore.StopReason, error) {
+	normalized := strings.ToLower(strings.TrimSpace(reason))
+	switch normalized {
+	case "stop", "end_turn", "tool_calls", "function_call", "tool_use", "length", "max_tokens", "max_output_tokens":
+		return stopReason(normalized), nil
+	case "cancelled", "canceled":
+		return agentcore.StopReasonAborted, &Error{Operation: "stream", Body: "provider cancelled generation", Retryable: false, Err: context.Canceled}
+	case "content_filter", "error":
+		return agentcore.StopReasonError, &Error{Operation: "stream", Body: "provider finish_reason: " + normalized, Retryable: false}
+	case "":
+		return "", nil
+	default:
+		return agentcore.StopReasonError, &Error{Operation: "stream", Body: "unsupported provider finish_reason: " + reason, Retryable: false}
 	}
 }

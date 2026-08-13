@@ -111,7 +111,8 @@ func (a *Agent) prompt(ctx context.Context, state State, prompts []Message, sink
 		ctx = context.Background()
 	}
 	emit := newEmitter(ctx, sink)
-	current := State{Messages: cloneMessages(state.Messages)}
+	repaired, _ := RepairHistory(state.Messages)
+	current := State{Messages: repaired}
 	newMessages := make([]Message, 0, len(prompts)+4)
 
 	if err := emit.send(Event{Type: EventAgentStart}); err != nil {
@@ -133,6 +134,11 @@ func (a *Agent) prompt(ctx context.Context, state State, prompts []Message, sink
 			return resultFrom(current, newMessages, 0, StopReasonError), err
 		}
 	}
+	baseLength := len(current.Messages) - len(newMessages)
+	current.Messages, _ = RepairHistory(current.Messages)
+	if baseLength <= len(current.Messages) {
+		newMessages = cloneMessages(current.Messages[baseLength:])
+	}
 
 	return a.run(ctx, current, newMessages, emit, true, queue)
 }
@@ -141,6 +147,8 @@ func (a *Agent) prompt(ctx context.Context, state State, prompts []Message, sink
 // must not be an assistant message because providers require user or tool input
 // before another assistant response.
 func (a *Agent) Continue(ctx context.Context, state State, sink EventSink) (Result, error) {
+	repaired, _ := RepairHistory(state.Messages)
+	state.Messages = repaired
 	if len(state.Messages) == 0 {
 		return Result{}, errors.New("agentcore: cannot continue empty state")
 	}
@@ -190,8 +198,6 @@ func (a *Agent) run(ctx context.Context, state State, newMessages []Message, emi
 		pendingMessages = nil
 
 		assistant, err := active.streamAssistant(ctx, state, turn, emit)
-		state.Messages = append(state.Messages, assistant)
-		newMessages = append(newMessages, assistant)
 		if err != nil {
 			stop := StopReasonError
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -199,6 +205,16 @@ func (a *Agent) run(ctx context.Context, state State, newMessages []Message, emi
 			}
 			return a.finish(state, newMessages, turn, stop, err, emit)
 		}
+		if assistant.StopReason == StopReasonError || assistant.StopReason == StopReasonAborted || assistant.IsError {
+			runErr := fmt.Errorf("agentcore: model returned non-replayable assistant stop reason %q", assistant.StopReason)
+			stop := StopReasonError
+			if assistant.StopReason == StopReasonAborted {
+				stop = StopReasonAborted
+			}
+			return a.finish(state, newMessages, turn, stop, runErr, emit)
+		}
+		state.Messages = append(state.Messages, assistant)
+		newMessages = append(newMessages, assistant)
 
 		calls := assistant.ToolCalls()
 		toolMessages := make([]Message, 0, len(calls))
@@ -223,6 +239,8 @@ func (a *Agent) run(ctx context.Context, state State, newMessages []Message, emi
 				state.Messages = append(state.Messages, message)
 				newMessages = append(newMessages, message)
 				toolMessages = append(toolMessages, message)
+			}
+			for _, message := range toolMessages {
 				copy := cloneMessage(message)
 				if err := emit.send(Event{Type: EventMessageStart, Turn: turn, Message: &copy}); err != nil {
 					return resultFrom(state, newMessages, turn, StopReasonError), err
@@ -402,9 +420,14 @@ func (a *Agent) streamAssistantAttempt(ctx context.Context, state State, turn in
 			return fail(fmt.Errorf("transform context: %w", err), false)
 		}
 	}
+	messages, _ = RepairHistory(messages)
 	messages, err := a.applyContextPolicy(ctx, messages, turn, emit)
 	if err != nil {
 		return fail(err, false)
+	}
+	messages, _ = RepairHistory(messages)
+	if err := ValidateHistory(messages); err != nil {
+		return fail(fmt.Errorf("validate context: %w", err), false)
 	}
 	request := ModelRequest{
 		SystemPrompt: a.config.SystemPrompt,
@@ -417,6 +440,10 @@ func (a *Agent) streamAssistantAttempt(ctx context.Context, state State, turn in
 	}
 	if err := a.beforeModelCall(ctx, &request); err != nil {
 		return fail(fmt.Errorf("before model call: %w", err), false)
+	}
+	request.Messages, _ = RepairHistory(request.Messages)
+	if err := ValidateHistory(request.Messages); err != nil {
+		return fail(fmt.Errorf("validate model request history: %w", err), false)
 	}
 
 	stream, err := startModelStream(ctx, a.config.Model, request)

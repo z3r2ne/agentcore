@@ -4,7 +4,7 @@
 semantics. It is designed to be imported as a library rather than launched as
 a CLI or RPC subprocess.
 
-Documentation: [中文使用指南](docs/USAGE.zh-CN.md) · [Pi conformance boundary](PI_CONFORMANCE.md)
+Documentation: [中文使用指南](docs/USAGE.zh-CN.md) · [Provider support](PROVIDERS.md) · [Pi conformance boundary](PI_CONFORMANCE.md)
 
 ## Installation
 
@@ -51,11 +51,14 @@ It includes:
 - stateful sessions with steering, follow-up, abort, and subscriptions;
 - multimodal image, audio, video, and file tool results;
 - run and session usage aggregation;
+- all 10 Pi wire APIs and 38 pinned provider presets;
+- deterministic repair and validation of interrupted tool-call history;
 - synchronous callback and asynchronous iterator APIs;
 - an Eino model/tool adapter.
 
 It intentionally excludes JSONL persistence, RPC, TUI, authentication,
-provider catalogs, extensions, and platform-specific coding tools.
+OAuth login and credential storage, remote model-catalog refresh, extensions,
+and platform-specific coding tools.
 
 The root package has no dependency on Aegis, Coordination, Phone, MCP, HTTP,
 or any application database. Applications own those integrations and expose
@@ -187,10 +190,35 @@ index for a typewriter preview. `event.Message.ToolCalls()` exposes no partial
 `Arguments`; final, valid JSON arguments appear on `EventMessageEnd` and the
 subsequent `EventToolExecutionStart`.
 
-## OpenAI-compatible provider
+## Built-in providers
 
-The optional `provider/openai` package implements streaming Chat Completions
-without adding provider behavior to the root package:
+The `provider` catalog constructs all 38 provider IDs from the pinned Pi
+catalog. It chooses each service's preferred wire protocol while still allowing
+an advertised alternative:
+
+```go
+import (
+    "os"
+
+    "github.com/z3r2ne/agentcore/provider"
+)
+
+model, err := provider.New("openrouter", provider.Config{
+    Model:  "anthropic/claude-sonnet-4",
+    APIKey: os.Getenv("OPENROUTER_API_KEY"),
+})
+```
+
+Native adapters cover OpenAI Chat Completions and Responses, Azure Responses,
+OpenAI Codex Responses, Anthropic Messages, Amazon Bedrock ConverseStream,
+Google Gemini and Vertex, Mistral Conversations, and Pi Messages. See the
+[complete provider matrix](PROVIDERS.md) for IDs, protocol alternatives,
+credentials, and endpoints.
+
+### Direct OpenAI-compatible configuration
+
+Use `provider/openai` directly when an OpenAI-compatible service needs transport
+limits or headers that are not represented in the catalog:
 
 ```go
 import (
@@ -273,6 +301,31 @@ The Eino adapter preserves the merged raw provider message in memory across
 tool turns. Provider-specific reasoning signatures and metadata therefore
 survive the next model request without becoming part of the public core API.
 The serialized representation also survives JSON round-trips of `State`.
+
+## History safety
+
+Every model request is built from a repaired copy of history. Failed or aborted
+assistant attempts and malformed partial tool calls are removed; orphaned,
+duplicate, and displaced tool results are normalized; missing results for a
+complete tool call receive a deterministic synthetic error explaining that the
+tool's effects are unknown. The original input slice is not mutated.
+
+Applications can inspect or enforce the same invariant at their own storage
+boundary:
+
+```go
+repaired, report := agentcore.RepairHistory(messages)
+if report.Changed {
+    log.Printf("repaired %d history issue(s)", len(report.Issues))
+}
+if err := agentcore.ValidateHistory(repaired); err != nil {
+    return err
+}
+```
+
+Repair also runs after custom context transforms and compactors, which prevents
+an extension from returning a tool-result sequence that a provider cannot
+replay safely.
 
 ## Stateful session
 

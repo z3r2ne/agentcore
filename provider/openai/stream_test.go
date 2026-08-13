@@ -155,6 +155,40 @@ func TestStreamWithoutDoneEndsAtEOF(t *testing.T) {
 	}
 }
 
+func TestUnexpectedEOFWithoutFinishReasonIsRetryable(t *testing.T) {
+	payload := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n"
+	stream := newStream(context.Background(), io.NopCloser(strings.NewReader(payload)), 1024)
+	chunk, err := stream.Recv()
+	if err != nil || chunk.TextDelta != "partial" {
+		t.Fatalf("chunk=%+v err=%v", chunk, err)
+	}
+	_, err = stream.Recv()
+	if err == nil || !errors.Is(err, io.ErrUnexpectedEOF) || !IsRetryable(err) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestErrorAndUnknownFinishReasonsFail(t *testing.T) {
+	for _, reason := range []string{"content_filter", "error", "vendor_reason"} {
+		t.Run(reason, func(t *testing.T) {
+			payload := fmt.Sprintf("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":%q}]}\n\n", reason)
+			stream := newStream(context.Background(), io.NopCloser(strings.NewReader(payload)), 1024)
+			if _, err := stream.Recv(); err == nil {
+				t.Fatal("terminal provider error succeeded")
+			}
+		})
+	}
+}
+
+func TestReasoningAliasesAndMissingToolIndexes(t *testing.T) {
+	payload := "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"think\",\"tool_calls\":[{\"id\":\"a\",\"function\":{\"name\":\"one\",\"arguments\":\"{}\"}},{\"id\":\"b\",\"function\":{\"name\":\"two\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
+	stream := newStream(context.Background(), io.NopCloser(strings.NewReader(payload)), 4096)
+	chunk, err := stream.Recv()
+	if err != nil || chunk.ThinkingDelta != "think" || len(chunk.ToolCallDeltas) != 2 || chunk.ToolCallDeltas[0].Index == chunk.ToolCallDeltas[1].Index {
+		t.Fatalf("chunk=%+v err=%v", chunk, err)
+	}
+}
+
 func TestInlineImageConversion(t *testing.T) {
 	content, err := convertContent([]agentcore.ContentBlock{
 		{Type: agentcore.ContentText, Text: "inspect"},

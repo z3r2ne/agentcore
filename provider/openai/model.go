@@ -40,6 +40,11 @@ type Config struct {
 	Headers    map[string]string
 	Header     http.Header
 
+	// BuildRequestBody replaces the default OpenAI request conversion while
+	// retaining this package's hardened HTTP and SSE transport. It is intended
+	// for first-party protocol dialect adapters such as Mistral.
+	BuildRequestBody func(model string, request agentcore.ModelRequest) (map[string]any, error)
+
 	// Limits are applied while reading untrusted provider responses. Zero uses
 	// a safe default; negative values are rejected.
 	MaxResponseBodyBytes int64
@@ -57,6 +62,8 @@ type Model struct {
 	maxResponseBodyBytes int64
 	maxErrorBodyBytes    int64
 	maxSSEEventBytes     int
+	scope                string
+	buildRequestBody     func(model string, request agentcore.ModelRequest) (map[string]any, error)
 }
 
 // String deliberately omits credentials and custom headers.
@@ -64,7 +71,14 @@ func (m *Model) String() string {
 	if m == nil {
 		return "openai.Model<nil>"
 	}
-	return fmt.Sprintf("openai.Model{model:%q, endpoint:%q}", m.model, m.endpoint)
+	endpoint := m.endpoint
+	if parsed, err := url.Parse(endpoint); err == nil {
+		parsed.User = nil
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		endpoint = parsed.String()
+	}
+	return fmt.Sprintf("openai.Model{model:%q, endpoint:%q}", m.model, endpoint)
 }
 
 // GoString deliberately omits credentials and custom headers.
@@ -110,6 +124,7 @@ func New(config Config) (*Model, error) {
 		endpoint: endpoint, apiKey: strings.TrimSpace(config.APIKey), client: client,
 		header: header, model: model, maxResponseBodyBytes: config.MaxResponseBodyBytes,
 		maxErrorBodyBytes: config.MaxErrorBodyBytes, maxSSEEventBytes: config.MaxSSEEventBytes,
+		scope: endpoint + "|" + model, buildRequestBody: config.BuildRequestBody,
 	}, nil
 }
 
@@ -157,21 +172,59 @@ func (m *Model) Stream(ctx context.Context, request agentcore.ModelRequest) (age
 		defer response.Body.Close()
 		return nil, readHTTPError(response, m.maxErrorBodyBytes)
 	}
+	if response.StatusCode != http.StatusOK {
+		defer response.Body.Close()
+		return nil, &Error{Operation: "response", StatusCode: response.StatusCode, Body: "streaming Chat Completions requires HTTP 200", Retryable: false}
+	}
+	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]))
+	if mediaType != "text/event-stream" {
+		defer response.Body.Close()
+		payload, _ := io.ReadAll(io.LimitReader(response.Body, m.maxErrorBodyBytes))
+		return nil, &Error{
+			Operation: "response", StatusCode: response.StatusCode,
+			Body:      fmt.Sprintf("expected text/event-stream, got %q: %s", mediaType, strings.TrimSpace(string(payload))),
+			Retryable: false,
+		}
+	}
 	limited := newLimitReadCloser(response.Body, m.maxResponseBodyBytes)
-	return newStream(ctx, limited, m.maxSSEEventBytes), nil
+	return newStreamWithScope(ctx, limited, m.maxSSEEventBytes, m.scope), nil
 }
 
 func (m *Model) requestBody(request agentcore.ModelRequest) (map[string]any, error) {
+	if m.buildRequestBody != nil {
+		return m.buildRequestBody(m.model, request)
+	}
 	messages := make([]map[string]any, 0, len(request.Messages)+1)
 	if strings.TrimSpace(request.SystemPrompt) != "" {
 		messages = append(messages, map[string]any{"role": "system", "content": request.SystemPrompt})
 	}
 	for _, message := range request.Messages {
-		converted, err := convertMessage(message)
+		converted, err := convertMessageForScope(message, m.scope)
 		if err != nil {
 			return nil, err
 		}
 		messages = append(messages, converted)
+		if message.Role == agentcore.RoleTool {
+			attachments := make([]agentcore.ContentBlock, 0)
+			for _, block := range message.Content {
+				switch block.Type {
+				case agentcore.ContentText:
+				case agentcore.ContentImage:
+					attachments = append(attachments, block)
+				default:
+					return nil, fmt.Errorf("provider/openai: unsupported tool result content type %q", block.Type)
+				}
+			}
+			if len(attachments) > 0 {
+				content, err := convertContent(attachments)
+				if err != nil {
+					return nil, err
+				}
+				parts := content.([]map[string]any)
+				parts = append([]map[string]any{{"type": "text", "text": "Tool result attachment for " + message.ToolName}}, parts...)
+				messages = append(messages, map[string]any{"role": "user", "content": parts})
+			}
+		}
 	}
 	body := map[string]any{
 		"model": m.model, "messages": messages, "stream": true,
@@ -206,9 +259,13 @@ func (m *Model) requestBody(request agentcore.ModelRequest) (map[string]any, err
 }
 
 func convertMessage(message agentcore.Message) (map[string]any, error) {
+	return convertMessageForScope(message, "")
+}
+
+func convertMessageForScope(message agentcore.Message, scope string) (map[string]any, error) {
 	if message.Role == agentcore.RoleAssistant && message.ProviderData != nil && message.ProviderData.Format == ProviderDataFormat {
 		var preserved preservedProviderData
-		if err := json.Unmarshal(message.ProviderData.Data, &preserved); err == nil && preserved.Message != nil {
+		if err := json.Unmarshal(message.ProviderData.Data, &preserved); err == nil && preserved.Message != nil && (scope == "" || preserved.Source == scope) {
 			result := cloneMap(preserved.Message)
 			result["role"] = "assistant"
 			return result, nil
@@ -225,6 +282,11 @@ func convertMessage(message agentcore.Message) (map[string]any, error) {
 		}
 		return result, nil
 	case agentcore.RoleAssistant:
+		for _, block := range message.Content {
+			if block.Type != agentcore.ContentText && block.Type != agentcore.ContentThinking && block.Type != agentcore.ContentToolCall {
+				return nil, fmt.Errorf("provider/openai: unsupported assistant content type %q", block.Type)
+			}
+		}
 		result["content"] = message.Text()
 		if thinking := messageContent(message.Content, agentcore.ContentThinking); thinking != "" {
 			result["reasoning_content"] = thinking
@@ -240,7 +302,15 @@ func convertMessage(message agentcore.Message) (map[string]any, error) {
 			result["tool_calls"] = converted
 		}
 		return result, nil
-	case agentcore.RoleSystem, agentcore.RoleUser:
+	case agentcore.RoleSystem:
+		for _, block := range message.Content {
+			if block.Type != agentcore.ContentText {
+				return nil, fmt.Errorf("provider/openai: unsupported system content type %q", block.Type)
+			}
+		}
+		result["content"] = message.Text()
+		return result, nil
+	case agentcore.RoleUser:
 		content, err := convertContent(message.Content)
 		if err != nil {
 			return nil, err

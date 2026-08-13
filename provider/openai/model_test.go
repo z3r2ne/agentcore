@@ -144,7 +144,7 @@ func TestModelRunsParallelToolLoopAndPreservesProviderData(t *testing.T) {
 	if result.StopReason != agentcore.StopReasonStop || result.State.Messages[len(result.State.Messages)-1].Text() != "done" {
 		t.Fatalf("result = %+v", result)
 	}
-	if result.Usage != (agentcore.Usage{InputTokens: 22, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 1}) {
+	if result.Usage != (agentcore.Usage{InputTokens: 19, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 1}) {
 		t.Fatalf("usage = %+v", result.Usage)
 	}
 	firstAssistant := result.State.Messages[1]
@@ -310,7 +310,7 @@ func TestCustomHTTPClient(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": {"text/event-stream"}},
-			Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+			Body:       io.NopCloser(strings.NewReader("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")),
 			Request:    request,
 		}, nil
 	})}
@@ -323,6 +323,9 @@ func TestCustomHTTPClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = stream.Recv()
+	if err == nil {
+		_, err = stream.Recv()
+	}
 	if !called.Load() || !errors.Is(err, io.EOF) {
 		t.Fatalf("called=%t err=%v", called.Load(), err)
 	}
