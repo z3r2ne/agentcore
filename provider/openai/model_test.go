@@ -168,6 +168,65 @@ func TestModelRunsParallelToolLoopAndPreservesProviderData(t *testing.T) {
 	}
 }
 
+func TestConvertMessageFallsBackFromMalformedPreservedToolArguments(t *testing.T) {
+	message := agentcore.Message{
+		Role: agentcore.RoleAssistant,
+		Content: []agentcore.ContentBlock{{Type: agentcore.ContentToolCall, ToolCall: &agentcore.ToolCall{
+			ID: "call-1", Name: "phone_action", Arguments: json.RawMessage(`{"action":"tap"}`),
+		}}},
+		ProviderData: &agentcore.ProviderData{
+			Format: ProviderDataFormat,
+			Data: json.RawMessage(`{
+				"source":"test-scope",
+				"message":{"role":"assistant","content":null,"tool_calls":[{
+					"id":"call-1","type":"function","function":{"name":"phone_action","arguments":"{\"action\":\"tap\""}
+				}]}
+			}`),
+		},
+	}
+
+	converted, err := convertMessageForScope(message, "test-scope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls, ok := converted["tool_calls"].([]map[string]any)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("tool_calls = %#v", converted["tool_calls"])
+	}
+	function := calls[0]["function"].(map[string]any)
+	if function["arguments"] != `{"action":"tap"}` {
+		t.Fatalf("function = %#v", function)
+	}
+	if converted["content"] != "" {
+		t.Fatalf("content = %#v", converted["content"])
+	}
+}
+
+func TestPreservedAssistantToolArgumentsValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		valid   bool
+	}{
+		{name: "no tool call", message: `{"content":"done"}`, valid: true},
+		{name: "valid tool call", message: `{"tool_calls":[{"function":{"arguments":"{}"}}]}`, valid: true},
+		{name: "invalid tool call JSON", message: `{"tool_calls":[{"function":{"arguments":"{\"path\":"}}]}`, valid: false},
+		{name: "non-string arguments", message: `{"tool_calls":[{"function":{"arguments":{}}}]}`, valid: false},
+		{name: "invalid legacy function call", message: `{"function_call":{"arguments":"["}}`, valid: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var message map[string]any
+			if err := json.Unmarshal([]byte(test.message), &message); err != nil {
+				t.Fatal(err)
+			}
+			if got := preservedAssistantToolArgumentsValid(message); got != test.valid {
+				t.Fatalf("valid = %t, want %t", got, test.valid)
+			}
+		})
+	}
+}
+
 func TestModelRetryUsesStructuredProviderError(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {

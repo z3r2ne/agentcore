@@ -265,7 +265,10 @@ func convertMessage(message agentcore.Message) (map[string]any, error) {
 func convertMessageForScope(message agentcore.Message, scope string) (map[string]any, error) {
 	if message.Role == agentcore.RoleAssistant && message.ProviderData != nil && message.ProviderData.Format == ProviderDataFormat {
 		var preserved preservedProviderData
-		if err := json.Unmarshal(message.ProviderData.Data, &preserved); err == nil && preserved.Message != nil && (scope == "" || preserved.Source == scope) {
+		if err := json.Unmarshal(message.ProviderData.Data, &preserved); err == nil &&
+			preserved.Message != nil &&
+			(scope == "" || preserved.Source == scope) &&
+			preservedAssistantToolArgumentsValid(preserved.Message) {
 			result := cloneMap(preserved.Message)
 			result["role"] = "assistant"
 			return result, nil
@@ -320,6 +323,49 @@ func convertMessageForScope(message agentcore.Message, scope string) (map[string
 	default:
 		return nil, fmt.Errorf("provider/openai: unsupported message role %q", message.Role)
 	}
+}
+
+// preservedAssistantToolArgumentsValid protects restored sessions from a
+// partially persisted streaming tool call. ProviderData is normally preferred
+// because it retains reasoning and vendor-specific fields, but it may contain
+// an incomplete function.arguments string when a stream or process stops
+// between argument deltas. Replaying that opaque message poisons every later
+// request with an upstream HTTP 400 even when the provider-neutral ToolCall was
+// completed and is valid. In that case convertMessageForScope deliberately
+// falls back to the neutral message representation.
+func preservedAssistantToolArgumentsValid(message map[string]any) bool {
+	for _, field := range []string{"tool_calls", "function_call"} {
+		value, exists := message[field]
+		if !exists || value == nil {
+			continue
+		}
+		calls := []any{value}
+		if field == "tool_calls" {
+			var ok bool
+			calls, ok = value.([]any)
+			if !ok {
+				return false
+			}
+		}
+		for _, rawCall := range calls {
+			call, ok := rawCall.(map[string]any)
+			if !ok {
+				return false
+			}
+			function := call
+			if field == "tool_calls" {
+				function, ok = call["function"].(map[string]any)
+				if !ok {
+					return false
+				}
+			}
+			arguments, ok := function["arguments"].(string)
+			if !ok || !json.Valid([]byte(arguments)) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func messageContent(blocks []agentcore.ContentBlock, kind agentcore.ContentType) string {
