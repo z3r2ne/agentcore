@@ -9,7 +9,7 @@ Documentation: [中文使用指南](docs/USAGE.zh-CN.md) · [Provider support](P
 ## Installation
 
 ```bash
-go get github.com/z3r2ne/agentcore@v0.2.1
+go get github.com/z3r2ne/agentcore@v0.2.4
 ```
 
 For a private repository, bypass the public Go proxy/checksum database and
@@ -18,7 +18,7 @@ route GitHub HTTPS module fetches through SSH on port 443:
 ```bash
 go env -w GOPRIVATE=github.com/z3r2ne/*
 git config --global url."ssh://git@ssh.github.com:443/".insteadOf https://github.com/
-go get github.com/z3r2ne/agentcore@v0.2.1
+go get github.com/z3r2ne/agentcore@v0.2.4
 ```
 
 Use a read-only deploy key, GitHub App token, or another least-privilege
@@ -52,6 +52,7 @@ It includes:
 - multimodal image, audio, video, and file tool results;
 - run and session usage aggregation;
 - all 10 Pi wire APIs and 38 pinned provider presets;
+- indexed reasoning-detail accumulation and replay repair for legacy fragments;
 - deterministic repair and validation of interrupted tool-call history;
 - synchronous callback and asynchronous iterator APIs;
 - an Eino model/tool adapter.

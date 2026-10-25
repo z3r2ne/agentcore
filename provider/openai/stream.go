@@ -402,7 +402,8 @@ func mergeObject(target, delta map[string]any, parent string) {
 		}
 		switch typed := value.(type) {
 		case string:
-			if path == "content" || path == "reasoning_content" || path == "refusal" || path == "function.arguments" || path == "function.name" {
+			if path == "content" || path == "reasoning_content" || path == "refusal" || path == "function.arguments" || path == "function.name" ||
+				path == "reasoning_details.text" || path == "reasoning_details.summary" || path == "reasoning_details.data" || path == "reasoning_details.signature" {
 				if existing, ok := target[key].(string); ok {
 					target[key] = existing + typed
 				} else {
@@ -420,7 +421,11 @@ func mergeObject(target, delta map[string]any, parent string) {
 			mergeObject(nested, typed, path)
 		case []any:
 			existing, _ := target[key].([]any)
-			target[key] = append(existing, cloneJSONSlice(typed)...)
+			if path == "reasoning_details" {
+				target[key] = mergeReasoningDetails(existing, typed)
+			} else {
+				target[key] = append(existing, cloneJSONSlice(typed)...)
+			}
 		case nil:
 			if _, exists := target[key]; !exists {
 				target[key] = nil
