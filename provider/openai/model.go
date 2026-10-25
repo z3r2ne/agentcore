@@ -265,12 +265,20 @@ func convertMessage(message agentcore.Message) (map[string]any, error) {
 func convertMessageForScope(message agentcore.Message, scope string) (map[string]any, error) {
 	if message.Role == agentcore.RoleAssistant && message.ProviderData != nil && message.ProviderData.Format == ProviderDataFormat {
 		var preserved preservedProviderData
-		if err := json.Unmarshal(message.ProviderData.Data, &preserved); err == nil &&
+		decoder := json.NewDecoder(bytes.NewReader(message.ProviderData.Data))
+		decoder.UseNumber()
+		if err := decoder.Decode(&preserved); err == nil && json.Valid(message.ProviderData.Data) &&
 			preserved.Message != nil &&
 			(scope == "" || preserved.Source == scope) &&
 			preservedAssistantToolArgumentsValid(preserved.Message) {
 			result := cloneMap(preserved.Message)
 			result["role"] = "assistant"
+			// Older versions persisted every reasoning delta as a separate array
+			// entry. Repair only the outgoing copy so existing sessions can resume
+			// without rewriting their original provider data or losing metadata.
+			if details, ok := result["reasoning_details"].([]any); ok && len(details) > 0 {
+				result["reasoning_details"] = mergeReasoningDetails(nil, details)
+			}
 			return result, nil
 		}
 	}

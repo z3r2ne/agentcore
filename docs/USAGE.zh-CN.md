@@ -204,6 +204,8 @@ model, err := openaiprovider.NewModel(openaiprovider.Config{
 - 标准 SSE 事件，包括多行 `data:`、注释和 `[DONE]`；
 - 一个响应中的多个并行 `tool_calls` 及分片参数拼接；
 - `content`、`reasoning_content`、`usage` 和常见缓存 Token 字段；
+- `reasoning_details` 按显式 `index` 合并流式碎片，保留文本、摘要、加密数据、签名和厂商元数据；
+- 恢复旧 Session 时仅规范化发送副本中的推理碎片，不改写原始 `ProviderData`，无需数据库迁移；
 - 把兼容服务的扩展消息字段保存为可序列化 `ProviderData`，工具执行后的下一轮会带回；
 - 自定义 `BaseURL`、API Key、单值/多值 Header 与 `http.Client`；
 - 请求阶段和流读取阶段的 `context.Context` 取消；

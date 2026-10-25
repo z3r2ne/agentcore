@@ -32,7 +32,7 @@ required.
 
 | Wire API | Native package | Notes |
 |---|---|---|
-| `openai-completions` | `provider/openai` | Chat Completions SSE, parallel tools, reasoning aliases, usage and provider-data replay |
+| `openai-completions` | `provider/openai` | Chat Completions SSE, parallel tools, reasoning aliases, indexed reasoning details, usage and provider-data replay |
 | `openai-responses` | `provider/openairesponses` | Responses SSE, reasoning items, function calls/outputs and cached-token usage |
 | `azure-openai-responses` | `provider/openairesponses` | Responses transport with Azure `api-key`; caller supplies the deployment endpoint |
 | `openai-codex-responses` | `provider/openairesponses` | Responses transport against the Codex endpoint; caller supplies a valid account token |
@@ -46,6 +46,13 @@ required.
 Every protocol above is implemented. `provider.New` can therefore construct
 every catalog entry once its service-specific endpoint and credentials are
 available.
+
+The Chat Completions adapter accumulates `reasoning_details` stream fragments
+by their explicit index, retaining block order, text, summaries, encrypted data,
+signatures and provider metadata. Missing or invalid indices and conflicting
+block identities are preserved separately. When replaying sessions saved by
+older versions, the adapter normalizes fragmented reasoning in the outgoing
+request without changing stored `ProviderData`. No database migration is needed.
 
 ## Provider catalog
 
